@@ -1,0 +1,335 @@
+# How many distinct customers have we ever had a session with?
+query = """
+SELECT 
+  COUNT(DISTINCT user_id) AS active_users
+FROM workspace.default.sessions_filtered
+"""
+
+# 1. How many distinct daily active users exists in the session table?
+query = """
+SELECT 
+  DATE(session_start) AS activity_date,
+  COUNT(DISTINCT user_id) AS daily_active_users
+FROM workspace.default.sessions_filtered
+GROUP BY activity_date
+ORDER BY activity_date DESC
+"""
+
+
+# 2. Are our highly engaged browsers actually converting into buyers, or is there major friction on the site?
+query = """
+CREATE OR REPLACE TABLE engagement_conversion_summary AS
+SELECT 
+  CASE 
+    WHEN page_clicks < 5 THEN 'Low Engagement (<5 clicks)'
+    WHEN page_clicks BETWEEN 5 AND 14 THEN 'Medium Engagement (5-20 clicks)'
+    ELSE 'High Engagement (25+ clicks)'
+  END AS engagement_tier,
+  COUNT(DISTINCT session_id) AS total_sessions,
+  SUM(CASE WHEN flight_booked = TRUE OR hotel_booked = TRUE THEN 1 ELSE 0 END) AS total_bookings,
+  ROUND(SUM(CASE WHEN flight_booked = TRUE OR hotel_booked = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(DISTINCT session_id), 2) AS conversion_rate
+FROM workspace.default.sessions_filtered
+GROUP BY 1
+ORDER BY 1
+"""
+
+
+# 3. What percentage of our booked sessions successfully bundle both a flight and a hotel, and where are we missing out?
+query = """
+SELECT 
+  CASE 
+    WHEN flight_booked = TRUE AND hotel_booked = TRUE THEN 'Bundle (Flight + Hotel)'
+    WHEN flight_booked = TRUE AND hotel_booked = FALSE THEN 'Flight Only'
+    WHEN flight_booked = FALSE AND hotel_booked = TRUE THEN 'Hotel Only'
+    ELSE 'No Booking (Browse Only)'
+  END AS session_outcome,
+  COUNT(DISTINCT session_id) AS session_count,
+  ROUND(COUNT(DISTINCT session_id) * 100.0 / SUM(COUNT(DISTINCT session_id)) OVER(), 2) AS percentage_of_traffic
+FROM workspace.default.sessions_filtered
+GROUP BY 1
+ORDER BY session_count DESC
+"""
+
+
+# 4. Are cancellations driven by spontaneous booking behavior, or do they correlate heavily with high-click browsing sessions?
+query = """
+SELECT 
+  CASE 
+    WHEN page_clicks < 10 THEN 'Quick Browse (<10 Clicks)'
+    ELSE 'Deep Search (10+ Clicks)'
+  END AS search_depth,
+  COUNT(DISTINCT session_id) AS total_booked_sessions,
+  SUM(CASE WHEN cancellation = TRUE THEN 1 ELSE 0 END) AS total_cancelled_trips,
+  ROUND(SUM(CASE WHEN cancellation = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(DISTINCT session_id), 2) AS cancellation_rate
+FROM workspace.default.sessions_filtered
+WHERE flight_booked = TRUE OR hotel_booked = TRUE
+GROUP BY search_depth
+ORDER BY search_depth
+"""
+
+
+# 5. At what hours of the day do users browse out of boredom vs. when do they log on to spend money?
+query = """
+SELECT 
+  EXTRACT(HOUR FROM session_start) AS hour_of_day,
+  COUNT(DISTINCT session_id) AS total_sessions,
+  ROUND(AVG(page_clicks), 1) AS avg_clicks_per_session,
+  SUM(CASE WHEN flight_booked = TRUE OR hotel_booked = TRUE THEN 1 ELSE 0 END) AS total_bookings,
+  ROUND(SUM(CASE WHEN flight_booked = TRUE OR hotel_booked = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(DISTINCT session_id), 2) AS conversion_rate
+FROM workspace.default.sessions_filtered
+GROUP BY 1
+ORDER BY 1;
+"""
+
+
+#6 How "smooth" is our checkout path? Does a higher number of clicks mean a user is discovering more things to buy, or does it mean they are frustrated and stuck?
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load sessions_filtered as pandas DataFrame
+df_sessions = spark.table("sessions_filtered").toPandas()
+
+# Filter for successful transactions (flight or hotel booked)
+successful_sessions = df_sessions[(df_sessions['flight_booked'] == True) | (df_sessions['hotel_booked'] == True)]
+
+# Calculate min, avg, and max clicks for successful transactions
+click_stats = {
+    'Min Clicks': successful_sessions['page_clicks'].min(),
+    'Avg Clicks': round(successful_sessions['page_clicks'].mean(), 2),
+    'Max Clicks': successful_sessions['page_clicks'].max()
+}
+
+# Create table for business users
+click_stats_df = pd.DataFrame([click_stats])
+display(click_stats_df)
+
+# Plot min, avg, and max clicks
+plt.figure(figsize=(6, 4))
+plt.bar(click_stats_df.columns, click_stats_df.iloc[0], color=['#4ecdc4', '#ffd93d', '#ff6b6b'])
+plt.xlabel('Checkout Path Metric')
+plt.ylabel('Number of Clicks')
+plt.title('Checkout Path Smoothness: Min, Avg, Max Clicks for Successful Transactions')
+plt.tight_layout()
+plt.show()
+
+
+# 1: User Sign-Up Trends by Month
+query = """
+SELECT
+  YEAR(sign_up_date) AS sign_up_year,
+  MONTH(sign_up_date) AS sign_up_month,
+  COUNT(user) AS new_users
+FROM user_agg_features
+WHERE sign_up_date IS NOT NULL
+GROUP BY sign_up_year, sign_up_month
+ORDER BY sign_up_year, sign_up_month
+"""
+
+# 2: Jan 2023 booking spike and retention strategy
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load user_agg_features as pandas DataFrame
+df = spark.table("user_agg_features").toPandas()
+
+# Filter cohort: users who signed up in January 2023
+cohort = df[
+    (pd.to_datetime(df['sign_up_date'], errors='coerce').dt.year == 2023) &
+    (pd.to_datetime(df['sign_up_date'], errors='coerce').dt.month == 1)
+]
+
+display(cohort)
+
+# Analyze sign-up spike: plot daily sign-ups in Jan 2023
+df['sign_up_date'] = pd.to_datetime(df['sign_up_date'], errors='coerce')
+jan_2023 = df[df['sign_up_date'].dt.year == 2023]
+jan_2023 = jan_2023[jan_2023['sign_up_date'].dt.month == 1]
+daily_signups = jan_2023.groupby(jan_2023['sign_up_date'].dt.date).size().reset_index(name='new_users')
+
+plt.figure(figsize=(12, 5))
+plt.plot(daily_signups['sign_up_date'], daily_signups['new_users'], marker='o', color='#4ecdc4', linewidth=2)
+plt.xlabel('Date', fontsize=14, fontweight='bold')
+plt.ylabel('New Users', fontsize=14, fontweight='bold')
+plt.title('Daily Sign-Ups: January 2023 Cohort', fontsize=16, fontweight='bold', pad=15)
+plt.xticks(rotation=45)
+plt.grid(alpha=0.3, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+# Check for campaign, holiday, or external factor
+# Example: Overlay major holidays or campaign dates
+holidays = pd.DataFrame({
+    'event': ['New Year', 'Epiphany', 'Winter Sale Campaign'],
+    'date': [pd.Timestamp('2023-01-01'), pd.Timestamp('2023-01-06'), pd.Timestamp('2023-01-10')]
+})
+
+plt.figure(figsize=(12, 5))
+plt.plot(daily_signups['sign_up_date'], daily_signups['new_users'], marker='o', color='#4ecdc4', linewidth=2)
+for idx, row in holidays.iterrows():
+    plt.axvline(row['date'], color='#ff6b6b', linestyle='--', linewidth=2, label=row['event'])
+plt.xlabel('Date', fontsize=14, fontweight='bold')
+plt.ylabel('New Users', fontsize=14, fontweight='bold')
+plt.title('January 2023 Cohort: Sign-Ups & Key Events', fontsize=16, fontweight='bold', pad=15)
+plt.legend(fontsize=12)
+plt.xticks(rotation=45)
+plt.grid(alpha=0.3, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+# Retention strategy for 3-year tenure users
+cohort['tenure_years'] = ((pd.Timestamp.today().normalize() - cohort['sign_up_date']).dt.days // 365)
+high_value = cohort[cohort['total_trips_booked'] >= 3]
+
+print(f"Total January 2023 cohort: {len(cohort):,}")
+print(f"Users crossing 3-year mark: {len(cohort[cohort['tenure_years'] >= 3]):,}")
+print(f"High-value users (3+ trips): {len(high_value):,}")
+
+# Example retention actions
+retention_actions = [
+    "Send personalized anniversary rewards",
+    "Offer exclusive loyalty perks for 3-year users",
+    "Invite to VIP events or webinars",
+    "Survey for feedback and product improvements",
+    "Targeted re-engagement email campaigns"
+]
+print("\nRecommended Retention Strategies for January 2023 Cohort:")
+for action in retention_actions:
+    print(f"- {action}")
+
+
+# 3 Calculate percentage of users who are married and/or have children using pandas
+import matplotlib.pyplot as plt
+
+# Load user_agg_features as pandas DataFrame
+df = spark.table("user_agg_features").toPandas()
+
+family_structure = df.groupby(['marital_status', 'children']).size().reset_index(name='user_count')
+total_users = family_structure['user_count'].sum()
+family_structure['percentage'] = (family_structure['user_count'] * 100.0 / total_users).round(2)
+family_structure['label'] = family_structure.apply(
+    lambda row: f"Married={row['marital_status']}, Children={row['children']}", axis=1
+)
+
+plt.figure(figsize=(10, 6))
+bars = plt.bar(family_structure['label'], family_structure['percentage'], color='#4ecdc4', edgecolor='black', alpha=0.85)
+plt.xlabel('Family & Marital Structure', fontsize=14, fontweight='bold')
+plt.ylabel('Percentage of Users (%)', fontsize=14, fontweight='bold')
+plt.title('User Base: Family & Marital Structure Breakdown', fontsize=16, fontweight='bold', pad=15)
+for i, pct in enumerate(family_structure['percentage']):
+    plt.text(i, pct + 1, f"{pct}%", ha='center', va='bottom', fontsize=12, fontweight='bold')
+plt.grid(axis='y', alpha=0.3, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+display(family_structure)
+
+  
+# 4:(Top  10 Home Airports)
+
+  import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load user_agg_features as pandas DataFrame
+df = spark.table("user_agg_features").toPandas()
+
+# Find top 10 home airports by user count
+top_airports = df.groupby(['home_airport', 'home_country']).size().reset_index(name='user_count')
+top_airports = top_airports.sort_values('user_count', ascending=False).head(10)
+
+# Prepare labels for plotting
+top_airports['label'] = top_airports['home_airport'].fillna('Unknown') + " (" + top_airports['home_country'].fillna('Unknown') + ")"
+
+plt.figure(figsize=(14, 7))
+bars = plt.barh(top_airports['label'], top_airports['user_count'], color='#4ecdc4', edgecolor='black', alpha=0.85, linewidth=2)
+plt.xlabel('Number of Users', fontsize=15, fontweight='bold')
+plt.ylabel('Home Airport (Country)', fontsize=15, fontweight='bold')
+plt.title('Top 10 Home Airports by User Count', fontsize=17, fontweight='bold', pad=15)
+for i, count in enumerate(top_airports['user_count']):
+    plt.text(count + 2, i, f'{count:,}', va='center', fontsize=12, fontweight='bold')
+plt.grid(axis='x', alpha=0.3, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+display(top_airports)
+
+
+# 5: Age Generational Distribution
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load user_agg_features as pandas DataFrame
+df = spark.table("user_agg_features").toPandas()
+
+# Calculate age from birthdate
+today = pd.Timestamp.today().normalize()
+df['birthdate'] = pd.to_datetime(df['birthdate'], errors='coerce')
+df['age'] = (today - df['birthdate']).dt.days // 365
+
+# Define generational buckets
+def get_generation(age):
+    if pd.isnull(age):
+        return 'Unknown'
+    if age < 27:
+        return 'Gen Z'
+    elif 27 <= age < 43:
+        return 'Millennial'
+    elif 43 <= age < 59:
+        return 'Gen X'
+    elif 59 <= age < 77:
+        return 'Baby Boomer'
+    else:
+        return 'Silent/Older'
+
+df['generation'] = df['age'].apply(get_generation)
+
+# Count users per generation
+generation_counts = df['generation'].value_counts().sort_index()
+generation_pct = (generation_counts * 100.0 / generation_counts.sum()).round(2)
+
+# Bar chart: Age Generational Distribution
+plt.figure(figsize=(10, 6))
+bars = plt.bar(generation_counts.index, generation_counts.values, color='#4ecdc4', edgecolor='black', alpha=0.85)
+plt.xlabel('Generation', fontsize=14, fontweight='bold')
+plt.ylabel('Number of Users', fontsize=14, fontweight='bold')
+plt.title('Age Generational Distribution of Users', fontsize=16, fontweight='bold', pad=15)
+for i, (count, pct) in enumerate(zip(generation_counts.values, generation_pct.values)):
+    plt.text(i, count + 5, f"{count} ({pct}%)", ha='center', va='bottom', fontsize=12, fontweight='bold')
+plt.grid(axis='y', alpha=0.3, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+display(pd.DataFrame({'Generation': generation_counts.index, 'User Count': generation_counts.values, 'Percentage': generation_pct.values}))
+
+
+# 6: : Gender-Based Regional Distribution
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load user_agg_features as pandas DataFrame
+df = spark.table("user_agg_features").toPandas()
+
+# Group by home_country and gender, count users
+gender_region = df.groupby(['home_country', 'gender']).size().reset_index(name='user_count')
+
+# Pivot for stacked bar chart
+pivot = gender_region.pivot(index='home_country', columns='gender', values='user_count').fillna(0)
+
+# Sort by total users descending
+pivot['total'] = pivot.sum(axis=1)
+pivot = pivot.sort_values('total', ascending=False).drop(columns='total')
+
+# Plot stacked bar chart
+pivot.plot(kind='bar', stacked=True, figsize=(14, 7), color=['#4ecdc4', '#ff6b6b', '#ffd93d', '#95e1d3'])
+plt.xlabel('Home Country', fontsize=14, fontweight='bold')
+plt.ylabel('Number of Users', fontsize=14, fontweight='bold')
+plt.title('Gender-Based Regional Distribution of Users', fontsize=16, fontweight='bold', pad=15)
+plt.legend(title='Gender', fontsize=12)
+plt.tight_layout()
+plt.show()
+
+display(gender_region)
+
+
